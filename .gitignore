@@ -1,0 +1,22 @@
+# Game files - copyrighted, never commit
+dump/
+js/main.decrypted.js
+js/*.mjs
+
+# Research scripts that only change what the client displays
+js/heal_dmg_console.js
+
+# Build output
+bin/
+obj/
+publish/
+TrainerBuild/
+release/
+*.obj
+*.exp
+*.lib
+*.dll
+
+# Local
+settings.json
+*_crash.log

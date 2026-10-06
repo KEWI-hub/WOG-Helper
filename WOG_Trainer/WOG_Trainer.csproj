@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <RootNamespace>WOG_Trainer</RootNamespace>
+    <AssemblyName>WOG Helper</AssemblyName>
+    <ApplicationIcon>icon.ico</ApplicationIcon>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+  </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="icon.ico" />
+    <EmbeddedResource Include="..\js\loot_log.js" LogicalName="WOG_Trainer.loot_log.js" />
+    <EmbeddedResource Include="..\js\auto.js" LogicalName="WOG_Trainer.auto.js" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\WOGHook\bin\WOGHook.dll" Link="WOGHook.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+</Project>
