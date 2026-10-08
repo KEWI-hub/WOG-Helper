@@ -47,10 +47,15 @@
   // ---------------------------------------------------------------- equip
   // Within one slot every item shares the same base stat type (e.g. gloves are all 1009), so
   // the base value is directly comparable. Ties: more random options, then higher grade.
+  // Ability columns hold one value or a list (e.g. pauldrons "40,200": main stat + bonus stat).
+  const columns = (v) => (v == null ? [] : Array.isArray(v) ? v : String(v).split(',')).map(Number);
+  const mainStatType = (row) => columns(row.EquipAbilityType)[0] ?? 0;
   function gearScore(item, row) {
-    const base = Number(row.EquipAbilityDetail) || 0;
+    const values = columns(row.EquipAbilityDetail).map(x => (Number.isFinite(x) ? x : 0));
+    const main = values[0] ?? 0;
+    const extra = values.slice(1).reduce((s, x) => s + x, 0);
     const ro = item?.randomOptions?.length ?? 0;
-    return [base, ro, row.RatingType];
+    return [main, extra, ro, row.RatingType];
   }
   function better(a, b) {
     for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] > b[i];
@@ -77,10 +82,12 @@
       if (!curTid) return { preset, cand, current: null };
       const curRow = nn.db.equip.get(curTid);
       if (!curRow) continue;
-      // Different base stat type (another class's item in the slot): only replace on grade.
+      // Worn item no longer fits the hero (class changed, level requirement): replace it.
+      if (!eq.canWearByLevelAndClass(curTid, slot.itemId)) return { preset, cand, current: curRow };
+      // Different main stat type (e.g. another weapon kind): only replace on grade.
       const curItem = data.getAllItemNotStack().find(x => x.itemId === slot.itemId);
       const curScore = gearScore(curItem, curRow);
-      const sameStat = String(curRow.EquipAbilityType) === String(cand.row.EquipAbilityType);
+      const sameStat = mainStatType(curRow) === mainStatType(cand.row);
       const wins = sameStat ? better(cand.score, curScore) : cand.row.RatingType > curRow.RatingType;
       if (wins) return { preset, cand, current: curRow };
     }
