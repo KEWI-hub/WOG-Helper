@@ -10,7 +10,7 @@
 
   const TREE_TRAINING = 1;      // E_TreeType.PassiveSkillTree ("Training")
   const LOC_INVENTORY = 1;      // E_ItemLocation.Inventory
-  const RESULT_SUCCESS = 1;     // E_NetResult.Success
+  const RESULT_SUCCESS = 1000;  // E_NetResult.Success (written as 1e3 in the bundle)
 
   const cfg = {
     equip:    { Enabled: false, IntervalSec: 5 },
