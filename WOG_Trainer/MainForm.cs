@@ -58,6 +58,8 @@ internal sealed class MainForm : Form
     private readonly CheckBox      _trainOn = new();
     private readonly CheckBox      _trainDamage = new();
     private readonly CheckBox      _raidOn = new();
+    private readonly CheckBox      _bossOn = new();
+    private readonly CheckBox      _arenaOn = new();
     private readonly NumericUpDown _raidSec = new();
     private readonly CheckBox      _fuseOn = new();
     private readonly ComboBox      _fuseMax = new();
@@ -81,9 +83,9 @@ internal sealed class MainForm : Form
     {
         Text = "WOG Helper";
         FormBorderStyle = FormBorderStyle.Sizable;
-        MinimumSize = new Size(540, 620);
+        MinimumSize = new Size(540, 660);
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(560, 720);
+        ClientSize = new Size(560, 760);
         BackColor = Bg;
         ForeColor = Fg;
         Font = new Font("Segoe UI", 9.5f);
@@ -233,9 +235,11 @@ internal sealed class MainForm : Form
         AddNumber(trainBox, "Between level ups (ms)", 200, 64, _trainMs, 200, 60000, _settings.Training.IntervalMs);
         _trainMs.Increment = 100;
 
-        var raidBox = MakeGroup("Auto Raid - enter Battlefield Raid while tickets last", ref y, 70);
-        SetupCheck(_raidOn, "Enabled", 12, 30, _settings.Raid.Enabled, raidBox);
-        AddNumber(raidBox, "Check every (sec)", 200, 30, _raidSec, 5, 600, _settings.Raid.IntervalSec);
+        var raidBox = MakeGroup("Battlefield - use tickets automatically", ref y, 104);
+        SetupCheck(_raidOn, "Raid", 12, 30, _settings.Raid.Enabled, raidBox);
+        SetupCheck(_bossOn, "World Boss", 170, 30, _settings.WorldBoss.Enabled, raidBox);
+        SetupCheck(_arenaOn, "Arena", 330, 30, _settings.Arena.Enabled, raidBox);
+        AddNumber(raidBox, "Check every (sec)", 200, 64, _raidSec, 5, 600, _settings.Raid.IntervalSec);
 
         var fuseBox = MakeGroup("Auto Fusion - Blacksmith fusion of spare bag items", ref y, 70);
         SetupCheck(_fuseOn, "Enabled", 12, 30, _settings.Fusion.Enabled, fuseBox);
@@ -383,6 +387,8 @@ internal sealed class MainForm : Form
         _settings.Training.DamageFirst = _trainDamage.Checked;
         _settings.Raid.Enabled         = _raidOn.Checked;
         _settings.Raid.IntervalSec     = (int)_raidSec.Value;
+        _settings.WorldBoss.Enabled    = _bossOn.Checked;
+        _settings.Arena.Enabled        = _arenaOn.Checked;
         _settings.Fusion.Enabled       = _fuseOn.Checked;
         _settings.Fusion.MaxRating     = _fuseMax.SelectedIndex + 1;
         _settings.Save();
@@ -579,7 +585,7 @@ internal sealed class MainForm : Form
         _autoStats.Text = $"Gold {gold:N0}   Equipped {s.GetProperty("equips").GetInt32()}   " +
                           $"Sorted {s.GetProperty("sorts").GetInt32()}   Trained {s.GetProperty("trainings").GetInt32()} " +
                           $"(-{s.GetProperty("goldSpent").GetInt64():N0} gold)   " +
-                          $"Raids {(s.TryGetProperty("raids", out var r) ? r.GetInt32() : 0)}   " +
+                          $"Raid {Stat(s, "raid")} Boss {Stat(s, "worldBoss")} Arena {Stat(s, "arena")}   " +
                           $"Fused {(s.TryGetProperty("fusions", out var f) ? f.GetInt32() : 0)}";
 
         _autoLog.BeginUpdate();
@@ -593,6 +599,8 @@ internal sealed class MainForm : Form
         }
         _autoLog.EndUpdate();
     }
+
+    private static int Stat(JsonElement s, string name) => s.TryGetProperty(name, out var v) ? v.GetInt32() : 0;
 
     private void RenderSmith(JsonElement plan)
     {

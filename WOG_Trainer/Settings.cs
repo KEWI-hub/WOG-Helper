@@ -10,6 +10,8 @@ internal sealed class Settings
     public TrainingSettings Training { get; set; } = new();
     public RaidSettings     Raid     { get; set; } = new();
     public FusionSettings   Fusion   { get; set; } = new();
+    public RaidSettings     WorldBoss { get; set; } = new();
+    public RaidSettings     Arena    { get; set; } = new();
     public bool HideCurrency { get; set; } = true;
 
     public sealed class EquipSettings    { public bool Enabled { get; set; } public int IntervalSec { get; set; } = 5; }
@@ -56,6 +58,8 @@ internal sealed class Settings
         sort     = new { Sort.Enabled, Sort.IntervalSec },
         training = new { Training.Enabled, Training.ReserveGold, Training.IntervalMs, Training.DamageFirst },
         raid     = new { Raid.Enabled, Raid.IntervalSec },
+        worldBoss = new { WorldBoss.Enabled, IntervalSec = Raid.IntervalSec },
+        arena    = new { Arena.Enabled, IntervalSec = Raid.IntervalSec },
         fusion   = new { Fusion.Enabled, Fusion.IntervalSec, Fusion.MaxRating },
     });
 }

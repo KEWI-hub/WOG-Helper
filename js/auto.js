@@ -1,12 +1,13 @@
 // WOG automation - drives the game's own buttons on a timer. Every action goes through the
 // same client functions the UI uses (and therefore the same server requests and checks).
-//   auto.config({ equip, sort, training, raid, fusion })   auto.fusionPlan()   auto.state()   auto.off()
+//   auto.config({ equip, sort, training, raid, worldBoss, arena, fusion })   auto.fusionPlan()   auto.state()   auto.off()
 //
 //   equip:    Enabled, IntervalSec  - equip the best wearable gear/accessory from the inventory
 //   sort:     Enabled, IntervalSec  - sort the inventory (also clears the 'New' markers)
 //   training: Enabled, ReserveGold, IntervalMs, DamageFirst - level up Training (gold only):
 //             best damage per gold first (saves up for it), otherwise the cheapest
-//   raid:     Enabled, IntervalSec  - enter Battlefield Raid while tickets last
+//   raid / worldBoss: Enabled, IntervalSec - enter Battlefield Raid / World Boss while tickets last
+//   arena:    Enabled, IntervalSec  - fight the best-value weaker opponent while tickets last
 //   fusion:   Enabled, IntervalSec, MaxRating - Blacksmith fusion of spare bag items up to a grade
 (() => {
   if (globalThis.auto) globalThis.auto.off();
@@ -20,9 +21,11 @@
     sort:     { Enabled: false, IntervalSec: 60 },
     training: { Enabled: false, ReserveGold: 0, IntervalMs: 1000, DamageFirst: true },
     raid:     { Enabled: false, IntervalSec: 10 },
+    worldBoss: { Enabled: false, IntervalSec: 10 },
+    arena:    { Enabled: false, IntervalSec: 10 },
     fusion:   { Enabled: false, IntervalSec: 30, MaxRating: 3 },
   };
-  const stats = { equips: 0, sorts: 0, trainings: 0, goldSpent: 0, raids: 0, fusions: 0 };
+  const stats = { equips: 0, sorts: 0, trainings: 0, goldSpent: 0, raid: 0, worldBoss: 0, arena: 0, fusions: 0 };
   const log = [];
   const timers = {};
   let busy = false;
@@ -202,43 +205,94 @@
   }
   const E_CONTENT_TRAINING = 13;   // E_ContentType.Training
 
-  // ---------------------------------------------------------------- raid
-  // Same path as the Battlefield "Enter" button. The server fights the whole raid; the
-  // result panel returns to the stage by itself after its countdown, then the next ticket goes.
-  const LEAGUE_RAID = 4;           // E_LeagueType.Raid
+  // ---------------------------------------------------------------- battlefield
+  // Raid, World Boss and Arena go through the same startDungeonBattle as the Battlefield
+  // buttons. The server fights the whole battle; the result panel returns to the stage by itself
+  // after its countdown, then the next ticket goes. One battle at a time for all three.
+  const LEAGUE = { arena: 1, worldBoss: 3, raid: 4 };   // E_LeagueType
   const SEASON_OPEN = 2;           // E_LeagueSeasonState.Open
   const TRY_ENTER = 0;             // E_DungeonTryType.Enter
   const ENTER_SUCCESS = 1;         // E_FieldEnterResult.Success
-  let raidBlockedNote = '';
-  function raidBlocked(why) {
-    if (raidBlockedNote !== why) note('raid', why);   // say it once, not every tick
-    raidBlockedNote = why;
+  const LABEL = { raid: 'raid', worldBoss: 'world boss', arena: 'arena' };
+  const blockedNote = {};
+  function blocked(kind, why) {
+    if (blockedNote[kind] !== why) note(kind, `${LABEL[kind]}: ${why}`);   // say it once, not every tick
+    blockedNote[kind] = why;
   }
-  async function raidTick() {
+  function battlefieldFree() {
     const fm = nn.services.combat.fieldManagerOrNull;
-    if (!fm || fm.hasDungeon || fm.isDungeonFlowBusy) return;   // in a raid, or still leaving one
+    return !!fm && !fm.hasDungeon && !fm.isDungeonFlowBusy;   // not in a battle, not leaving one
+  }
+  async function openLeagueTid(kind) {
+    const league = nn.services.league;
+    let leagueTid = league.getCurrentLeagueTidByLeagueType(LEAGUE[kind]);
+    if (leagueTid <= 0) {
+      await league.reqLeagueSeasonInfo();
+      leagueTid = league.getCurrentLeagueTidByLeagueType(LEAGUE[kind]);
+    }
+    if (leagueTid <= 0) { blocked(kind, 'no season'); return 0; }
+    if (league.getStrLeagueSeasonRemainTime02(leagueTid)[0] !== SEASON_OPEN) { blocked(kind, 'season is not open'); return 0; }
+    return leagueTid;
+  }
+  function hasTicket(kind, table) {
+    if (table.EntryItemID > 0 && !nn.services.item.hasEnoughStackItem(table.EntryItemID, table.EntryItemCnt, false)) {
+      blocked(kind, 'out of tickets');
+      return false;
+    }
+    return true;
+  }
+  async function enter(kind, table, target) {
+    blockedNote[kind] = '';
+    const left = Number(nn.services.item.getStackItemCount(table.EntryItemID));
+    const res = await nn.services.dungeon.startDungeonBattle(table.DungeonID, target, TRY_ENTER);
+    if (res === ENTER_SUCCESS) {
+      stats[kind]++;
+      const vs = target ? ` vs ${target.nick} (CP ${Number(target.combatPower).toLocaleString()})` : '';
+      note(kind, `entered ${LABEL[kind]}${vs} (${left - table.EntryItemCnt} tickets left)`);
+    } else {
+      note('error', `${LABEL[kind]} enter failed: ${res}`);
+    }
+  }
+  // Raid / World Boss: the Battlefield tab's Enter button.
+  function leagueDungeonTick(kind) {
+    return async () => {
+      if (!battlefieldFree()) return;
+      await exclusive(async () => {
+        if (!(await openLeagueTid(kind))) return;
+        const table = nn.services.league.getEnterDungeonTable(LEAGUE[kind]);
+        if (!table) return blocked(kind, 'not available');
+        if (!hasTicket(kind, table)) return;
+        await enter(kind, table, undefined);
+      });
+    };
+  }
+  // Arena: pick from the challenge list the server offers. Among opponents with lower CP take
+  // the one worth the most points; if everyone is stronger, take the weakest.
+  async function arenaTick() {
+    if (!battlefieldFree()) return;
     await exclusive(async () => {
-      const league = nn.services.league;
-      let leagueTid = league.getCurrentLeagueTidByLeagueType(LEAGUE_RAID);
-      if (leagueTid <= 0) {
-        await league.reqLeagueSeasonInfo();
-        leagueTid = league.getCurrentLeagueTidByLeagueType(LEAGUE_RAID);
+      if (!(await openLeagueTid('arena'))) return;
+      const table = nn.db.dungeon.get(nn.db.config.Dungeon_Arena_Single_Server_ID);
+      if (!table) return blocked('arena', 'not available');
+      if (!hasTicket('arena', table)) return;
+      const res = await nn.net.manager.gameSession.reqArenaPvpUserInfo(table.DungeonID);
+      const info = !res || res.hasError() ? null : res.Data.arenaPvpUserInfo();
+      if (!info) return blocked('arena', 'could not load the challenge list');
+      // Raw flatbuffer rows; same fields the game's NetServerRankInfo copies out.
+      const list = [];
+      for (let i = 0; i < info.serverRankInfosLength(); i++) {
+        const raw = info.serverRankInfos(i);
+        if (!raw) continue;
+        const r = { rank: raw.rank(), userId: raw.userId(), nick: raw.nick() ?? '', lv: raw.lv(),
+                    combatPower: raw.combatPower(), guildType: raw.guildType(), score: raw.score(),
+                    isMatchUser: raw.isMatchUser() };
+        list.push({ r, cp: Number(r.combatPower), win: nn.db.arena.getByListOrder(i + 1)?.WinScore ?? 0 });
       }
-      if (leagueTid <= 0) return raidBlocked('no raid season');
-      if (league.getStrLeagueSeasonRemainTime02(leagueTid)[0] !== SEASON_OPEN) return raidBlocked('raid season is not open');
-      const table = league.getEnterDungeonTable(LEAGUE_RAID);
-      if (!table) return raidBlocked('raid not available');
-      if (table.EntryItemID > 0 && !nn.services.item.hasEnoughStackItem(table.EntryItemID, table.EntryItemCnt, false))
-        return raidBlocked('out of raid tickets');
-      raidBlockedNote = '';
-      const left = Number(nn.services.item.getStackItemCount(table.EntryItemID));
-      const res = await nn.services.dungeon.startDungeonBattle(table.DungeonID, undefined, TRY_ENTER);
-      if (res === ENTER_SUCCESS) {
-        stats.raids++;
-        note('raid', `entered raid (${left - table.EntryItemCnt} tickets left)`);
-      } else {
-        note('error', 'raid enter failed: ' + res);
-      }
+      if (!list.length) return blocked('arena', 'empty challenge list');
+      const myCp = nn.services.contentState.finalCp.toNumber();
+      const weaker = list.filter(x => x.cp < myCp).sort((a, b) => b.win - a.win || a.cp - b.cp);
+      const pick = weaker[0] ?? list.slice().sort((a, b) => a.cp - b.cp)[0];
+      await enter('arena', table, pick.r);
     });
   }
 
@@ -297,7 +351,9 @@
     schedule('equip', cfg.equip.Enabled, cfg.equip.IntervalSec * 1000, equipTick);
     schedule('sort', cfg.sort.Enabled, cfg.sort.IntervalSec * 1000, sortTick);
     schedule('training', cfg.training.Enabled, cfg.training.IntervalMs, trainingTick);
-    schedule('raid', cfg.raid.Enabled, cfg.raid.IntervalSec * 1000, raidTick);
+    schedule('raid', cfg.raid.Enabled, cfg.raid.IntervalSec * 1000, leagueDungeonTick('raid'));
+    schedule('worldBoss', cfg.worldBoss.Enabled, cfg.worldBoss.IntervalSec * 1000, leagueDungeonTick('worldBoss'));
+    schedule('arena', cfg.arena.Enabled, cfg.arena.IntervalSec * 1000, arenaTick);
     schedule('fusion', cfg.fusion.Enabled, cfg.fusion.IntervalSec * 1000, fusionTick);
   }
 
