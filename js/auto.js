@@ -1,12 +1,13 @@
 // WOG automation - drives the game's own buttons on a timer. Every action goes through the
 // same client functions the UI uses (and therefore the same server requests and checks).
-//   auto.config({ equip, sort, training, raid })   auto.state()   auto.off()
+//   auto.config({ equip, sort, training, raid, fusion })   auto.fusionPlan()   auto.state()   auto.off()
 //
 //   equip:    Enabled, IntervalSec  - equip the best wearable gear/accessory from the inventory
 //   sort:     Enabled, IntervalSec  - sort the inventory (also clears the 'New' markers)
 //   training: Enabled, ReserveGold, IntervalMs, DamageFirst - level up Training (gold only):
 //             best damage per gold first (saves up for it), otherwise the cheapest
 //   raid:     Enabled, IntervalSec  - enter Battlefield Raid while tickets last
+//   fusion:   Enabled, IntervalSec, MaxRating - Blacksmith fusion of spare bag items up to a grade
 (() => {
   if (globalThis.auto) globalThis.auto.off();
 
@@ -19,8 +20,9 @@
     sort:     { Enabled: false, IntervalSec: 60 },
     training: { Enabled: false, ReserveGold: 0, IntervalMs: 1000, DamageFirst: true },
     raid:     { Enabled: false, IntervalSec: 10 },
+    fusion:   { Enabled: false, IntervalSec: 30, MaxRating: 3 },
   };
-  const stats = { equips: 0, sorts: 0, trainings: 0, goldSpent: 0, raids: 0 };
+  const stats = { equips: 0, sorts: 0, trainings: 0, goldSpent: 0, raids: 0, fusions: 0 };
   const log = [];
   const timers = {};
   let busy = false;
@@ -65,7 +67,7 @@
     return false;
   }
   function findEquipUpgrade() {
-    const eq = nn.services.equipment, im = nn.services.itemMove, data = nn.net.data.item;
+    const im = nn.services.itemMove, data = nn.net.data.item;
     const best = new Map();   // "equipType:part" -> {item,row,score}
     for (const item of data.getAllItemNotStack()) {
       if (item.location !== LOC_INVENTORY || item.isLock) continue;
@@ -77,24 +79,29 @@
       if (!cur || better(score, cur.score)) best.set(key, { item, row, score });
     }
     for (const cand of best.values()) {
-      const preset = eq.getPresetByEquipType(cand.row.EquipType);
-      if (!preset) continue;
-      const slot = preset.getCurrentPresetItemSlot(cand.row.PartsType);
-      if (slot?.slotLock ?? slot?._info?._slotLock) continue;
-      const curTid = slot?.itemTid ?? 0;
-      if (!curTid) return { preset, cand, current: null };
-      const curRow = nn.db.equip.get(curTid);
-      if (!curRow) continue;
-      // Worn item no longer fits the hero (class changed, level requirement): replace it.
-      if (!eq.canWearByLevelAndClass(curTid, slot.itemId)) return { preset, cand, current: curRow };
-      // Different main stat type (e.g. another weapon kind): only replace on grade.
-      const curItem = data.getAllItemNotStack().find(x => x.itemId === slot.itemId);
-      const curScore = gearScore(curItem, curRow);
-      const sameStat = mainStatType(curRow) === mainStatType(cand.row);
-      const wins = sameStat ? better(cand.score, curScore) : cand.row.RatingType > curRow.RatingType;
-      if (wins) return { preset, cand, current: curRow };
+      const cmp = compareWithEquipped(cand.item, cand.row);
+      if (cmp && !cmp.slotLocked && cmp.wins) return { preset: cmp.preset, cand, current: cmp.current };
     }
     return null;
+  }
+  // Would this (wearable) item replace what the hero has in its slot?
+  function compareWithEquipped(item, row) {
+    const eq = nn.services.equipment;
+    const preset = eq.getPresetByEquipType(row.EquipType);
+    if (!preset) return null;
+    const slot = preset.getCurrentPresetItemSlot(row.PartsType);
+    const slotLocked = !!(slot?.slotLock ?? slot?._info?._slotLock);
+    const curTid = slot?.itemTid ?? 0;
+    if (!curTid) return { preset, slotLocked, current: null, wins: true };
+    const curRow = nn.db.equip.get(curTid);
+    if (!curRow) return null;
+    // Worn item no longer fits the hero (class changed, level requirement): replace it.
+    if (!eq.canWearByLevelAndClass(curTid, slot.itemId)) return { preset, slotLocked, current: curRow, wins: true };
+    // Different main stat type (e.g. another weapon kind): only replace on grade.
+    const curItem = nn.net.data.item.getAllItemNotStack().find(x => x.itemId === slot.itemId);
+    const sameStat = mainStatType(curRow) === mainStatType(row);
+    const wins = sameStat ? better(gearScore(item, row), gearScore(curItem, curRow)) : row.RatingType > curRow.RatingType;
+    return { preset, slotLocked, current: curRow, wins };
   }
   async function equipTick() {
     await exclusive(async () => {
@@ -235,6 +242,52 @@
     });
   }
 
+  // ---------------------------------------------------------------- blacksmith (fusion)
+  // N items of one grade and level band fuse into a random item of a higher grade. Only bag
+  // items are used: never storage, locked, equipped items, or gear that would beat what the
+  // hero wears (Auto Equip wants those). Fewest random options go first, like the game.
+  const RATING_NAMES = ['', 'Normal', 'Magic', 'Rare', 'Hero', 'Legend', 'Myth', 'Ancient', 'Primordial', 'Transcendent', 'Divine'];
+  function isKeeper(item, row) {
+    if (!row || !nn.services.itemMove.canEquipTo(item.itemTid, row.PartsType, item.itemId)) return false;
+    return !!compareWithEquipped(item, row)?.wins;
+  }
+  function fusionPlan() {
+    const W = nn.services.workshop, itemMove = nn.services.itemMove;
+    const groups = new Map();   // FusionID -> {fusion, items[], kept[]}
+    for (const item of nn.net.data.item.getAllItemNotStack()) {
+      if (item.location !== LOC_INVENTORY || item.isLock || itemMove.isEquippedItemId(item.itemId)) continue;
+      const fusion = W.resolveFusionTableByItem(item.itemTid, item.itemId);
+      if (!fusion || !W.canUseAsFusionMaterial(fusion, item.itemTid, item.itemId)) continue;
+      const g = groups.get(fusion.FusionID) ?? { fusion, items: [], kept: [] };
+      (isKeeper(item, nn.db.equip.get(item.itemTid)) ? g.kept : g.items).push(item);
+      groups.set(fusion.FusionID, g);
+    }
+    return [...groups.values()];
+  }
+  async function fusionTick() {
+    await exclusive(async () => {
+      const W = nn.services.workshop;
+      const ready = fusionPlan()
+        .filter(g => g.fusion.MaterialRating <= cfg.fusion.MaxRating && g.items.length >= g.fusion.MaterialRatingCnt)
+        .sort((a, b) => a.fusion.MaterialRating - b.fusion.MaterialRating);
+      const g = ready[0];
+      if (!g) return;
+      const ro = (it) => it.randomOptions?.length ?? 0;
+      const pick = g.items.slice().sort((a, b) => ro(a) - ro(b)).slice(0, g.fusion.MaterialRatingCnt);
+      const materials = pick.map(it => ({ itemId: it.itemId, itemTid: it.itemTid, itemCnt: 1 }));
+      const names = pick.map(it => nn.services.item.getItemName(it.itemTid));
+      const res = await W.reqFusionAsync(g.fusion.FusionID, materials);
+      if (res?.NetResult === RESULT_SUCCESS) {
+        stats.fusions++;
+        let got = '';
+        try { got = W.buildFusionRewards(res.Data, g.fusion.ContentType).map(r => nn.services.item.getItemName(r.tid)).join(', '); } catch (e) {}
+        note('fusion', `${RATING_NAMES[g.fusion.MaterialRating]} x${pick.length} (${names.join(', ')}) -> ${got || 'done'}`);
+      } else {
+        note('error', 'fusion failed: ' + (res?.NetResult ?? 'no response'));
+      }
+    });
+  }
+
   // ---------------------------------------------------------------- scheduling
   function schedule(key, enabled, ms, fn) {
     if (timers[key]) { clearInterval(timers[key]); delete timers[key]; }
@@ -245,6 +298,7 @@
     schedule('sort', cfg.sort.Enabled, cfg.sort.IntervalSec * 1000, sortTick);
     schedule('training', cfg.training.Enabled, cfg.training.IntervalMs, trainingTick);
     schedule('raid', cfg.raid.Enabled, cfg.raid.IntervalSec * 1000, raidTick);
+    schedule('fusion', cfg.fusion.Enabled, cfg.fusion.IntervalSec * 1000, fusionTick);
   }
 
   globalThis.auto = {
@@ -256,6 +310,13 @@
     state(n = 30) {
       return { cfg, stats, gold: String(nn.services.item.getStackItemCount(nn.db.config.gen.Gold_ItemID)),
                log: log.slice(-n) };
+    },
+    fusionPlan() {
+      return fusionPlan().map(g => ({
+        rating: g.fusion.MaterialRating, grade: RATING_NAMES[g.fusion.MaterialRating] ?? String(g.fusion.MaterialRating),
+        level: g.fusion.MaterialLevelLimit, need: g.fusion.MaterialRatingCnt, have: g.items.length, kept: g.kept.length,
+        items: g.items.map(it => nn.services.item.getItemName(it.itemTid)),
+      })).sort((a, b) => b.have / b.need - a.have / a.need || a.rating - b.rating);
     },
     preview() {
       const up = findEquipUpgrade();

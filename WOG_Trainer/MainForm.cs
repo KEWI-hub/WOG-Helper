@@ -37,6 +37,10 @@ internal sealed class MainForm : Form
     private readonly Button _tabAuto = new();
     private readonly Panel  _pageLoot = new();
     private readonly Panel  _pageAuto = new();
+    private readonly Button _tabSmith = new();
+    private readonly Panel  _pageSmith = new();
+    private readonly Label    _smithInfo = new();
+    private readonly ListView _smithList = new();
 
     // Loot page
     private readonly Label    _summary = new();
@@ -55,6 +59,11 @@ internal sealed class MainForm : Form
     private readonly CheckBox      _trainDamage = new();
     private readonly CheckBox      _raidOn = new();
     private readonly NumericUpDown _raidSec = new();
+    private readonly CheckBox      _fuseOn = new();
+    private readonly ComboBox      _fuseMax = new();
+
+    private static readonly string[] Grades =
+        ["Normal", "Magic", "Rare", "Hero", "Legend", "Myth", "Ancient", "Primordial", "Transcendent", "Divine"];
     private readonly NumericUpDown _trainReserve = new();
     private readonly NumericUpDown _trainMs = new();
     private readonly Label         _autoStats = new();
@@ -93,12 +102,15 @@ internal sealed class MainForm : Form
 
         StyleButton(_tabLoot, "Loot Log", Panel, Fg);
         _tabLoot.SetBounds(12, 54, 120, 30);
-        _tabLoot.Click += (_, _) => ShowPage(loot: true);
+        _tabLoot.Click += (_, _) => ShowPage(_pageLoot);
         StyleButton(_tabAuto, "Automation", Panel, Fg);
         _tabAuto.SetBounds(136, 54, 120, 30);
-        _tabAuto.Click += (_, _) => ShowPage(loot: false);
+        _tabAuto.Click += (_, _) => ShowPage(_pageAuto);
+        StyleButton(_tabSmith, "Blacksmith", Panel, Fg);
+        _tabSmith.SetBounds(260, 54, 120, 30);
+        _tabSmith.Click += (_, _) => ShowPage(_pageSmith);
 
-        foreach (var page in new[] { _pageLoot, _pageAuto })
+        foreach (var page in new[] { _pageLoot, _pageAuto, _pageSmith })
         {
             page.SetBounds(0, 90, ClientSize.Width, ClientSize.Height - 90);
             page.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
@@ -106,9 +118,10 @@ internal sealed class MainForm : Form
         }
         BuildLootPage();
         BuildAutoPage();
+        BuildSmithPage();
 
-        Controls.AddRange([_connect, _status, _tabLoot, _tabAuto, _pageLoot, _pageAuto]);
-        ShowPage(loot: true);
+        Controls.AddRange([_connect, _status, _tabLoot, _tabAuto, _tabSmith, _pageLoot, _pageAuto, _pageSmith]);
+        ShowPage(_pageLoot);
 
         _poll.Tick += async (_, _) => await PollAsync();
         SetConnectedUi(false);
@@ -224,6 +237,18 @@ internal sealed class MainForm : Form
         SetupCheck(_raidOn, "Enabled", 12, 30, _settings.Raid.Enabled, raidBox);
         AddNumber(raidBox, "Check every (sec)", 200, 30, _raidSec, 5, 600, _settings.Raid.IntervalSec);
 
+        var fuseBox = MakeGroup("Auto Fusion - Blacksmith fusion of spare bag items", ref y, 70);
+        SetupCheck(_fuseOn, "Enabled", 12, 30, _settings.Fusion.Enabled, fuseBox);
+        var fuseLabel = new Label { Text = "Fuse up to grade", Left = 200, Top = 33, Width = 170, ForeColor = Dim };
+        _fuseMax.DropDownStyle = ComboBoxStyle.DropDownList;
+        _fuseMax.Items.AddRange(Grades);
+        _fuseMax.SelectedIndex = Math.Clamp(_settings.Fusion.MaxRating, 1, Grades.Length) - 1;
+        _fuseMax.SetBounds(374, 30, 140, 26);
+        _fuseMax.BackColor = Bg;
+        _fuseMax.ForeColor = Fg;
+        _fuseMax.SelectedIndexChanged += (_, _) => OnAutoSettingChanged();
+        fuseBox.Controls.AddRange([fuseLabel, _fuseMax]);
+
         _autoStats.SetBounds(12, y + 4, 536, 22);
         _autoStats.ForeColor = Accent;
         _autoStats.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
@@ -305,14 +330,28 @@ internal sealed class MainForm : Form
         foreach (var (name, width) in cols) lv.Columns.Add(name, width);
     }
 
-    private void ShowPage(bool loot)
+    private void ShowPage(Panel page)
     {
-        _pageLoot.Visible = loot;
-        _pageAuto.Visible = !loot;
-        _tabLoot.BackColor = loot ? Accent : Panel;
-        _tabLoot.ForeColor = loot ? Color.Black : Fg;
-        _tabAuto.BackColor = loot ? Panel : Accent;
-        _tabAuto.ForeColor = loot ? Fg : Color.Black;
+        foreach (var (p, tab) in new[] { (_pageLoot, _tabLoot), (_pageAuto, _tabAuto), (_pageSmith, _tabSmith) })
+        {
+            bool on = p == page;
+            p.Visible = on;
+            tab.BackColor = on ? Accent : Panel;
+            tab.ForeColor = on ? Color.Black : Fg;
+        }
+    }
+
+    private void BuildSmithPage()
+    {
+        _smithInfo.SetBounds(12, 0, 536, 40);
+        _smithInfo.ForeColor = Dim;
+        _smithInfo.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+        _smithInfo.Text = "Spare bag items per fusion group. Locked items, storage and gear better than " +
+                          "what you wear are left out. Green = ready to fuse.";
+        SetupList(_smithList, ("Grade", 80), ("Lv", 40), ("Have", 70), ("Items", 330));
+        _smithList.SetBounds(12, 44, 536, _pageSmith.Height - 56);
+        _smithList.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+        _pageSmith.Controls.AddRange([_smithInfo, _smithList]);
     }
 
     private void SetConnectedUi(bool on)
@@ -344,6 +383,8 @@ internal sealed class MainForm : Form
         _settings.Training.DamageFirst = _trainDamage.Checked;
         _settings.Raid.Enabled         = _raidOn.Checked;
         _settings.Raid.IntervalSec     = (int)_raidSec.Value;
+        _settings.Fusion.Enabled       = _fuseOn.Checked;
+        _settings.Fusion.MaxRating     = _fuseMax.SelectedIndex + 1;
         _settings.Save();
         if (_bridge != null) await RunAsync($"auto.config({_settings.ToAutoConfigJs()})");
     }
@@ -461,7 +502,8 @@ internal sealed class MainForm : Form
         try
         {
             string json = await EvalAsync(
-                "({loot:typeof loot==='object'?loot.state():null,auto:typeof auto==='object'?auto.state(40):null})");
+                "({loot:typeof loot==='object'?loot.state():null,auto:typeof auto==='object'?auto.state(40):null," +
+                "smith:typeof auto==='object'&&auto.fusionPlan?auto.fusionPlan():null})");
             var root = JsonDocument.Parse(json).RootElement;
             if (root.GetProperty("loot").ValueKind == JsonValueKind.Null ||
                 root.GetProperty("auto").ValueKind == JsonValueKind.Null)
@@ -471,6 +513,7 @@ internal sealed class MainForm : Form
             }
             RenderLoot(root.GetProperty("loot"));
             RenderAuto(root.GetProperty("auto"));
+            if (root.TryGetProperty("smith", out var smith) && smith.ValueKind == JsonValueKind.Array) RenderSmith(smith);
             _failures = 0;
             SetStatus("Connected", Good);
         }
@@ -536,7 +579,8 @@ internal sealed class MainForm : Form
         _autoStats.Text = $"Gold {gold:N0}   Equipped {s.GetProperty("equips").GetInt32()}   " +
                           $"Sorted {s.GetProperty("sorts").GetInt32()}   Trained {s.GetProperty("trainings").GetInt32()} " +
                           $"(-{s.GetProperty("goldSpent").GetInt64():N0} gold)   " +
-                          $"Raids {(s.TryGetProperty("raids", out var r) ? r.GetInt32() : 0)}";
+                          $"Raids {(s.TryGetProperty("raids", out var r) ? r.GetInt32() : 0)}   " +
+                          $"Fused {(s.TryGetProperty("fusions", out var f) ? f.GetInt32() : 0)}";
 
         _autoLog.BeginUpdate();
         _autoLog.Items.Clear();
@@ -548,6 +592,24 @@ internal sealed class MainForm : Form
             _autoLog.Items.Add(item);
         }
         _autoLog.EndUpdate();
+    }
+
+    private void RenderSmith(JsonElement plan)
+    {
+        _smithList.BeginUpdate();
+        _smithList.Items.Clear();
+        foreach (var g in plan.EnumerateArray())
+        {
+            int have = g.GetProperty("have").GetInt32(), need = g.GetProperty("need").GetInt32();
+            int kept = g.GetProperty("kept").GetInt32();
+            var names = g.GetProperty("items").EnumerateArray().Select(x => x.GetString())
+                         .GroupBy(n => n).Select(n => n.Count() > 1 ? $"{n.Key} x{n.Count()}" : n.Key);
+            var item = new ListViewItem([g.GetProperty("grade").GetString(), g.GetProperty("level").GetInt32().ToString(),
+                                         $"{have}/{need}" + (kept > 0 ? $" (+{kept} kept)" : ""), string.Join(", ", names)]);
+            if (have >= need) item.ForeColor = Good;
+            _smithList.Items.Add(item);
+        }
+        _smithList.EndUpdate();
     }
 
     // Item grade colour from the game's rich text. The common grade is a dark grey that is

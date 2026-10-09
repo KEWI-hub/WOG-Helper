@@ -9,11 +9,18 @@ internal sealed class Settings
     public SortSettings     Sort     { get; set; } = new();
     public TrainingSettings Training { get; set; } = new();
     public RaidSettings     Raid     { get; set; } = new();
+    public FusionSettings   Fusion   { get; set; } = new();
     public bool HideCurrency { get; set; } = true;
 
     public sealed class EquipSettings    { public bool Enabled { get; set; } public int IntervalSec { get; set; } = 5; }
     public sealed class SortSettings     { public bool Enabled { get; set; } public int IntervalSec { get; set; } = 60; }
     public sealed class RaidSettings     { public bool Enabled { get; set; } public int IntervalSec { get; set; } = 10; }
+    public sealed class FusionSettings
+    {
+        public bool Enabled { get; set; }
+        public int IntervalSec { get; set; } = 30;
+        public int MaxRating { get; set; } = 3;   // Rare
+    }
     public sealed class TrainingSettings
     {
         public bool Enabled { get; set; }
@@ -49,5 +56,6 @@ internal sealed class Settings
         sort     = new { Sort.Enabled, Sort.IntervalSec },
         training = new { Training.Enabled, Training.ReserveGold, Training.IntervalMs, Training.DamageFirst },
         raid     = new { Raid.Enabled, Raid.IntervalSec },
+        fusion   = new { Fusion.Enabled, Fusion.IntervalSec, Fusion.MaxRating },
     });
 }
