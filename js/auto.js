@@ -1,10 +1,12 @@
 // WOG automation - drives the game's own buttons on a timer. Every action goes through the
 // same client functions the UI uses (and therefore the same server requests and checks).
-//   auto.config({ equip: {...}, sort: {...}, training: {...} })   auto.state()   auto.off()
+//   auto.config({ equip, sort, training, raid })   auto.state()   auto.off()
 //
 //   equip:    Enabled, IntervalSec  - equip the best wearable gear/accessory from the inventory
 //   sort:     Enabled, IntervalSec  - sort the inventory (also clears the 'New' markers)
-//   training: Enabled, ReserveGold, IntervalMs - level up the cheapest Training (gold only)
+//   training: Enabled, ReserveGold, IntervalMs, DamageFirst - level up Training (gold only):
+//             best damage per gold first (saves up for it), otherwise the cheapest
+//   raid:     Enabled, IntervalSec  - enter Battlefield Raid while tickets last
 (() => {
   if (globalThis.auto) globalThis.auto.off();
 
@@ -15,9 +17,10 @@
   const cfg = {
     equip:    { Enabled: false, IntervalSec: 5 },
     sort:     { Enabled: false, IntervalSec: 60 },
-    training: { Enabled: false, ReserveGold: 0, IntervalMs: 1000 },
+    training: { Enabled: false, ReserveGold: 0, IntervalMs: 1000, DamageFirst: true },
+    raid:     { Enabled: false, IntervalSec: 10 },
   };
-  const stats = { equips: 0, sorts: 0, trainings: 0, goldSpent: 0 };
+  const stats = { equips: 0, sorts: 0, trainings: 0, goldSpent: 0, raids: 0 };
   const log = [];
   const timers = {};
   let busy = false;
@@ -120,32 +123,67 @@
   }
 
   // ---------------------------------------------------------------- training
-  function findCheapestTraining() {
+  // Damage value of a level: the rise in the game's own offensive CP terms (attack, attack
+  // speed, damage, boss damage, hit, crit, elements, block ignore, cooldown, end damage).
+  const OFFENSE_CP = [166, 169, 171, 172, 173, 175, 177, 178, 179, 186, 207, 212];
+  const PVP_ONLY = new Set([1065, 1067]);   // Duel / Combat Defense: no effect while farming
+  const offenseCp = (C) => OFFENSE_CP.reduce((s, f) => s + Number(C.calcValue(f)), 0);
+  // contentState.calcInstantValue overwrites the stat and then zeroes it, so it must not be
+  // used. Add the delta, evaluate and put the old value back within this same JS turn.
+  function offenseGain(type, delta) {
+    const C = nn.services.contentState;
+    const base = offenseCp(C);
+    const cur = C.getValueToNumber(type);
+    C.setValue(type, cur + delta);
+    try { return offenseCp(C) - base; }
+    finally { C.setValue(type, cur); }
+  }
+
+  // Candidates the hero could level now if gold allows (open, visible, not maxed).
+  function trainingCandidates() {
     const T = nn.services.tree;
     const goldTid = nn.db.config.gen.Gold_ItemID;
-    const gold = Number(nn.services.item.getStackItemCount(goldTid));
-    let best = null;
+    const out = [];
     for (const groupId of T.getGroupIds(TREE_TRAINING)) {
-      if (!T.canEnchantGroup(TREE_TRAINING, groupId)) continue;
       const tid = T.getCurrentEnchantTreeId(TREE_TRAINING, groupId);
+      if (tid <= 0 || !T.canDisplay(TREE_TRAINING, tid)) continue;
+      const block = T.getEnchantBlock(TREE_TRAINING, tid);
+      if (block !== 0 && block !== 5) continue;   // 5 = not enough materials yet
       const mats = T.getLevelUpMaterials(TREE_TRAINING, tid);
       if (mats.length === 0 || mats.some(m => m.itemTid !== goldTid)) continue;   // gold only
       const cost = mats.reduce((s, m) => s + Number(m.needCnt), 0);
-      if (gold - cost < cfg.training.ReserveGold) continue;
-      if (!best || cost < best.cost) best = { groupId, tid, cost };
+      const next = T.getTable(TREE_TRAINING, tid);
+      const reached = T.getReachedTable(TREE_TRAINING, groupId);
+      const type = columns(next.AbilityType)[0];
+      const delta = (columns(next.AbilityDetailCnt)[0] || 0) - (reached ? columns(reached.AbilityDetailCnt)[0] || 0 : 0);
+      out.push({ groupId, tid, cost, type, delta, name: nn.db.locale.getText(next.Name ?? '') });
     }
-    return best;
+    return out;
+  }
+
+  function findTraining() {
+    const gold = Number(nn.services.item.getStackItemCount(nn.db.config.gen.Gold_ItemID));
+    const affordable = (c) => gold - c.cost >= cfg.training.ReserveGold;
+    const all = trainingCandidates();
+    if (cfg.training.DamageFirst) {
+      for (const c of all) c.gain = PVP_ONLY.has(c.type) || c.delta <= 0 ? 0 : offenseGain(c.type, c.delta);
+      const dmg = all.filter(c => c.gain > 0).sort((a, b) => b.gain / b.cost - a.gain / a.cost || a.cost - b.cost);
+      // Save up for the best damage per gold instead of spending on a weaker one.
+      if (dmg.length) return affordable(dmg[0]) ? dmg[0] : null;
+    }
+    // Cheapest first (also once nothing left adds damage).
+    return all.filter(affordable).sort((a, b) => a.cost - b.cost)[0] ?? null;
   }
   async function trainingTick() {
     await exclusive(async () => {
       if (nn.services.unlockCondition.isLocked(E_CONTENT_TRAINING)) return;
-      const pick = findCheapestTraining();
+      const pick = findTraining();
       if (!pick) return;
       const T = nn.services.tree;
+      if (!T.canEnchantGroup(TREE_TRAINING, pick.groupId)) return;
       const before = T.getReachedLevel(TREE_TRAINING, pick.groupId);
       const ok = await T.reqEnchantAsync(TREE_TRAINING, pick.groupId);
-      const row = T.getTable(TREE_TRAINING, pick.tid);
-      const name = row ? nn.db.locale.getText(row.Name ?? '') : '#' + pick.groupId;
+      const name = pick.name || '#' + pick.groupId;
       if (ok) {
         stats.trainings++;
         stats.goldSpent += pick.cost;
@@ -157,6 +195,46 @@
   }
   const E_CONTENT_TRAINING = 13;   // E_ContentType.Training
 
+  // ---------------------------------------------------------------- raid
+  // Same path as the Battlefield "Enter" button. The server fights the whole raid; the
+  // result panel returns to the stage by itself after its countdown, then the next ticket goes.
+  const LEAGUE_RAID = 4;           // E_LeagueType.Raid
+  const SEASON_OPEN = 2;           // E_LeagueSeasonState.Open
+  const TRY_ENTER = 0;             // E_DungeonTryType.Enter
+  const ENTER_SUCCESS = 1;         // E_FieldEnterResult.Success
+  let raidBlockedNote = '';
+  function raidBlocked(why) {
+    if (raidBlockedNote !== why) note('raid', why);   // say it once, not every tick
+    raidBlockedNote = why;
+  }
+  async function raidTick() {
+    const fm = nn.services.combat.fieldManagerOrNull;
+    if (!fm || fm.hasDungeon || fm.isDungeonFlowBusy) return;   // in a raid, or still leaving one
+    await exclusive(async () => {
+      const league = nn.services.league;
+      let leagueTid = league.getCurrentLeagueTidByLeagueType(LEAGUE_RAID);
+      if (leagueTid <= 0) {
+        await league.reqLeagueSeasonInfo();
+        leagueTid = league.getCurrentLeagueTidByLeagueType(LEAGUE_RAID);
+      }
+      if (leagueTid <= 0) return raidBlocked('no raid season');
+      if (league.getStrLeagueSeasonRemainTime02(leagueTid)[0] !== SEASON_OPEN) return raidBlocked('raid season is not open');
+      const table = league.getEnterDungeonTable(LEAGUE_RAID);
+      if (!table) return raidBlocked('raid not available');
+      if (table.EntryItemID > 0 && !nn.services.item.hasEnoughStackItem(table.EntryItemID, table.EntryItemCnt, false))
+        return raidBlocked('out of raid tickets');
+      raidBlockedNote = '';
+      const left = Number(nn.services.item.getStackItemCount(table.EntryItemID));
+      const res = await nn.services.dungeon.startDungeonBattle(table.DungeonID, undefined, TRY_ENTER);
+      if (res === ENTER_SUCCESS) {
+        stats.raids++;
+        note('raid', `entered raid (${left - table.EntryItemCnt} tickets left)`);
+      } else {
+        note('error', 'raid enter failed: ' + res);
+      }
+    });
+  }
+
   // ---------------------------------------------------------------- scheduling
   function schedule(key, enabled, ms, fn) {
     if (timers[key]) { clearInterval(timers[key]); delete timers[key]; }
@@ -166,6 +244,7 @@
     schedule('equip', cfg.equip.Enabled, cfg.equip.IntervalSec * 1000, equipTick);
     schedule('sort', cfg.sort.Enabled, cfg.sort.IntervalSec * 1000, sortTick);
     schedule('training', cfg.training.Enabled, cfg.training.IntervalMs, trainingTick);
+    schedule('raid', cfg.raid.Enabled, cfg.raid.IntervalSec * 1000, raidTick);
   }
 
   globalThis.auto = {
@@ -180,10 +259,10 @@
     },
     preview() {
       const up = findEquipUpgrade();
-      const tr = findCheapestTraining();
+      const tr = findTraining();
       return {
         equip: up ? `${nn.services.item.getItemName(up.cand.item.itemTid)} -> part ${up.cand.row.PartsType}` : null,
-        training: tr ? `group ${tr.groupId} cost ${tr.cost}` : null,
+        training: tr ? `${tr.name} cost ${tr.cost}${tr.gain ? " dmgCP +" + tr.gain.toFixed(1) : ""}` : null,
       };
     },
     off() {

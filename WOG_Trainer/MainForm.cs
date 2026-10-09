@@ -52,6 +52,9 @@ internal sealed class MainForm : Form
     private readonly CheckBox      _sortOn = new();
     private readonly NumericUpDown _sortSec = new();
     private readonly CheckBox      _trainOn = new();
+    private readonly CheckBox      _trainDamage = new();
+    private readonly CheckBox      _raidOn = new();
+    private readonly NumericUpDown _raidSec = new();
     private readonly NumericUpDown _trainReserve = new();
     private readonly NumericUpDown _trainMs = new();
     private readonly Label         _autoStats = new();
@@ -69,9 +72,9 @@ internal sealed class MainForm : Form
     {
         Text = "WOG Helper";
         FormBorderStyle = FormBorderStyle.Sizable;
-        MinimumSize = new Size(540, 560);
+        MinimumSize = new Size(540, 620);
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(560, 660);
+        ClientSize = new Size(560, 720);
         BackColor = Bg;
         ForeColor = Fg;
         Font = new Font("Segoe UI", 9.5f);
@@ -208,20 +211,25 @@ internal sealed class MainForm : Form
         SetupCheck(_sortOn, "Enabled", 12, 30, _settings.Sort.Enabled, sortBox);
         AddNumber(sortBox, "Every (sec)", 200, 30, _sortSec, 5, 3600, _settings.Sort.IntervalSec);
 
-        var trainBox = MakeGroup("Auto Training - level up the cheapest Training with gold", ref y, 104);
+        var trainBox = MakeGroup("Auto Training - level up Training with gold", ref y, 104);
         SetupCheck(_trainOn, "Enabled", 12, 30, _settings.Training.Enabled, trainBox);
+        SetupCheck(_trainDamage, "Damage first", 12, 64, _settings.Training.DamageFirst, trainBox);
         AddNumber(trainBox, "Keep gold (reserve)", 200, 30, _trainReserve, 0, 1_000_000_000_000m, _settings.Training.ReserveGold);
         _trainReserve.ThousandsSeparator = true;
         _trainReserve.Increment = 1000;
         AddNumber(trainBox, "Between level ups (ms)", 200, 64, _trainMs, 200, 60000, _settings.Training.IntervalMs);
         _trainMs.Increment = 100;
 
+        var raidBox = MakeGroup("Auto Raid - enter Battlefield Raid while tickets last", ref y, 70);
+        SetupCheck(_raidOn, "Enabled", 12, 30, _settings.Raid.Enabled, raidBox);
+        AddNumber(raidBox, "Check every (sec)", 200, 30, _raidSec, 5, 600, _settings.Raid.IntervalSec);
+
         _autoStats.SetBounds(12, y + 4, 536, 22);
         _autoStats.ForeColor = Accent;
         _autoStats.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
         var logLabel = MakeHeader("Activity", 12, y + 30);
         SetupList(_autoLog, ("Time", 80), ("Action", 80), ("Details", 340));
-        _autoLog.SetBounds(12, y + 54, 536, 510 - (y + 54) + 42);
+        _autoLog.SetBounds(12, y + 54, 536, _pageAuto.Height - (y + 54) - 12);
         _autoLog.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
 
         _pageAuto.Controls.AddRange([_autoStats, logLabel, _autoLog]);
@@ -333,6 +341,9 @@ internal sealed class MainForm : Form
         _settings.Training.Enabled     = _trainOn.Checked;
         _settings.Training.ReserveGold = (long)_trainReserve.Value;
         _settings.Training.IntervalMs  = (int)_trainMs.Value;
+        _settings.Training.DamageFirst = _trainDamage.Checked;
+        _settings.Raid.Enabled         = _raidOn.Checked;
+        _settings.Raid.IntervalSec     = (int)_raidSec.Value;
         _settings.Save();
         if (_bridge != null) await RunAsync($"auto.config({_settings.ToAutoConfigJs()})");
     }
@@ -524,7 +535,8 @@ internal sealed class MainForm : Form
         long gold = long.TryParse(state.GetProperty("gold").GetString(), out var g) ? g : 0;
         _autoStats.Text = $"Gold {gold:N0}   Equipped {s.GetProperty("equips").GetInt32()}   " +
                           $"Sorted {s.GetProperty("sorts").GetInt32()}   Trained {s.GetProperty("trainings").GetInt32()} " +
-                          $"(-{s.GetProperty("goldSpent").GetInt64():N0} gold)";
+                          $"(-{s.GetProperty("goldSpent").GetInt64():N0} gold)   " +
+                          $"Raids {(s.TryGetProperty("raids", out var r) ? r.GetInt32() : 0)}";
 
         _autoLog.BeginUpdate();
         _autoLog.Items.Clear();
